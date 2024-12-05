@@ -2,9 +2,9 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import PowerTransformer
 from scipy import stats  # For Box-Cox transformation
-from scipy.stats import zscore
+from scipy.stats import zscore, boxcox, yeojohnson
 from b_class_data_transform import DataTransform
-
+import random
 
 class DataFrameTransform:
     def __init__(self, df):
@@ -71,8 +71,73 @@ class DataFrameTransform:
         skewed_cols = skewed_cols[abs(skewed_cols) > threshold]
         return skewed_cols.index.tolist()
 
-    def transform_skewed_columns(self, columns):
-        """Apply transformations to skewed columns to reduce skewness."""
+    def log_transform(self, col):
+        """Log transformation (handles non-positive values by shifting)."""
+        try:
+            if (self.df[col] <= 0).any():
+                shifted_col = self.df[col] - self.df[col].min() + 1
+                transformed = np.log1p(shifted_col)
+            else:
+                transformed = np.log1p(self.df[col])
+            skew = transformed.skew()
+            return {'transformed': transformed, 'skew': skew}
+        except Exception as e:
+            print(f"Log transformation failed on '{col}': {e}")
+            return None
+
+    def sqrt_transform(self, col):
+        """Square root transformation (handles non-positive values by shifting)."""
+        try:
+            if (self.df[col] < 0).any():
+                shifted_col = self.df[col] - self.df[col].min()
+                transformed = np.sqrt(shifted_col)
+            else:
+                transformed = np.sqrt(self.df[col])
+            skew = transformed.skew()
+            return {'transformed': transformed, 'skew': skew}
+        except Exception as e:
+            print(f"Square Root transformation failed on '{col}': {e}")
+            return None
+
+    def reciprocal_transform(self, col):
+        """Reciprocal transformation (handles zero values by adding a small constant)."""
+        try:
+            shifted_col = self.df[col] + 1e-6  # Adding a small constant to avoid division by zero
+            transformed = 1 / shifted_col
+            skew = transformed.skew()
+            return {'transformed': transformed, 'skew': skew}
+        except Exception as e:
+            print(f"Reciprocal transformation failed on '{col}': {e}")
+            return None
+
+    def boxcox_transform(self, col):
+        """Box-Cox transformation (only for positive values)."""
+        try:
+            if (self.df[col] > 0).all():
+                transformed, _ = boxcox(self.df[col].dropna())
+                transformed_series = pd.Series(transformed, index=self.df[col].dropna().index)
+                skew = transformed_series.skew()
+                return {'transformed': transformed_series, 'skew': skew}
+            else:
+                raise ValueError("Box-Cox transformation requires all positive values.")
+        except Exception as e:
+            print(f"Box-Cox transformation failed on '{col}': {e}")
+            return None
+        
+    def yeojohnson_transform(self, col):
+        """Yeo-Johnson transformation (works with any range of values)."""
+        try:
+            yeo_transformer = PowerTransformer(method='yeo-johnson')
+            transformed = yeo_transformer.fit_transform(self.df[[col]].dropna())
+            transformed_series = pd.Series(transformed.flatten(), index=self.df[col].dropna().index)
+            skew = transformed_series.skew()
+            return {'transformed': transformed_series, 'skew': skew}
+        except Exception as e:
+            print(f"Yeo-Johnson transformation failed on '{col}': {e}")
+            return None
+
+    def transform_skewed_columns(self, columns, skew_threshold=0.1, margin=0.05):
+        """Apply transformations to skewed columns to reduce skewness, with flexibility in selection."""
         for col in columns:
             original_skew = self.df[col].skew()
             print(f"\nOriginal skewness for '{col}': {original_skew:.2f}")
@@ -80,109 +145,41 @@ class DataFrameTransform:
             # Initialize a dictionary to store results of transformations
             transformations = {}
 
-            # Check applicability and apply transformations
-            try:
-                # Box-Cox transformation (only for positive values)
-                if (self.df[col] > 0).all():
-                    transformed_data, _ = boxcox(self.df[col])
-                    transformations['boxcox'] = {
-                        'transformed': transformed_data,
-                        'skew': pd.Series(transformed_data).skew()
-                    }
-            except Exception as e:
-                print(f"Box-Cox transformation failed on '{col}': {e}")
+            # Apply different transformations
+            transformations['boxcox'] = self.boxcox_transform(col)
+            transformations['yeojohnson'] = self.yeojohnson_transform(col)
+            transformations['log'] = self.log_transform(col)
+            transformations['sqrt'] = self.sqrt_transform(col)
+            transformations['reciprocal'] = self.reciprocal_transform(col)
 
-            try:
-                # Yeo-Johnson transformation (works for any values)
-                transformed_data, _ = yeojohnson(self.df[col])
-                transformations['yeojohnson'] = {
-                    'transformed': transformed_data,
-                    'skew': pd.Series(transformed_data).skew()
-                }
-            except Exception as e:
-                print(f"Yeo-Johnson transformation failed on '{col}': {e}")
-
-            try:
-                # Log transformation (only for positive values)
-                if (self.df[col] > 0).all():
-                    transformed_data = np.log1p(self.df[col])
-                    transformations['log'] = {
-                        'transformed': transformed_data,
-                        'skew': transformed_data.skew()
-                    }
-            except Exception as e:
-                print(f"Log transformation failed on '{col}': {e}")
-
-            try:
-                # Square root transformation (only for non-negative values)
-                if (self.df[col] >= 0).all():
-                    transformed_data = np.sqrt(self.df[col])
-                    transformations['sqrt'] = {
-                        'transformed': transformed_data,
-                        'skew': transformed_data.skew()
-                    }
-            except Exception as e:
-                print(f"Square Root transformation failed on '{col}': {e}")
-
-            try:
-                # Reciprocal transformation (only for positive values)
-                if (self.df[col] > 0).all():
-                    transformed_data = 1 / (self.df[col] + 1e-9)  # Adding a small constant to avoid division by zero
-                    transformations['reciprocal'] = {
-                        'transformed': transformed_data,
-                        'skew': transformed_data.skew()
-                    }
-            except Exception as e:
-                print(f"Reciprocal transformation failed on '{col}': {e}")
+            # Filter out any failed transformations
+            transformations = {k: v for k, v in transformations.items() if v is not None}
 
             # Select the transformation with the lowest skew
             if transformations:
-                best_transform = min(transformations, key=lambda k: abs(transformations[k]['skew']))
-                self.df[col] = transformations[best_transform]['transformed']
-                print(f"Applied {best_transform} transform on '{col}' (new skewness: {transformations[best_transform]['skew']:.2f})")
+                # Get all transformations sorted by absolute skewness
+                sorted_transformations = sorted(transformations.items(), key=lambda x: abs(x[1]['skew']))
+                best_skew = abs(sorted_transformations[0][1]['skew'])
+
+                # Get transformations with skewness within a margin of the best one
+                candidates = [
+                    (name, trans) for name, trans in sorted_transformations
+                    if abs(trans['skew']) <= best_skew + margin
+                ]
+
+                # Randomly choose one of the best candidates to diversify transformations
+                chosen_transform = random.choice(candidates)
+                best_transform_name, best_transform = chosen_transform
+
+                # Apply the chosen transformation
+                self.df[col] = best_transform['transformed']
+                
+                if abs(best_transform['skew']) > skew_threshold:
+                    print(f"Applied {best_transform_name} transform on '{col}', but skewness remains {best_transform['skew']:.2f}, which is higher than the desired threshold.")
+                else:
+                    print(f"Applied {best_transform_name} transform on '{col}' (new skewness: {best_transform['skew']:.2f})")
             else:
                 print(f"No transformation could be applied successfully to '{col}'. Skewness remains {original_skew:.2f}.")
-
-    def log_transform(self, col):
-        """Log transformation (handles non-positive values by shifting)."""
-        if (self.df[col] <= 0).any():
-            shifted_col = self.df[col] - self.df[col].min() + 1
-            transformed = np.log1p(shifted_col)
-        else:
-            transformed = np.log1p(self.df[col])
-        return {'transformed': transformed, 'skew': transformed.skew()}
-
-    def sqrt_transform(self, col):
-        """Square root transformation (handles non-positive values by shifting)."""
-        if (self.df[col] < 0).any():
-            shifted_col = self.df[col] - self.df[col].min()
-            transformed = np.sqrt(shifted_col)
-        else:
-            transformed = np.sqrt(self.df[col])
-        return {'transformed': transformed, 'skew': transformed.skew()}
-
-    def reciprocal_transform(self, col):
-        """Reciprocal transformation (handles non-zero values)."""
-        if (self.df[col] == 0).any():
-            shifted_col = self.df[col] + 1e-6
-            transformed = 1 / shifted_col
-        else:
-            transformed = 1 / self.df[col]
-        return {'transformed': transformed, 'skew': transformed.skew()}
-
-    def boxcox_transform(self, col):
-        """Box-Cox transformation (only for positive values)."""
-        if (self.df[col] > 0).all():
-            transformed, _ = stats.boxcox(self.df[col] + 1e-6)
-            return {'transformed': pd.Series(transformed, index=self.df[col].index), 'skew': pd.Series(transformed).skew()}
-        else:
-            raise ValueError("Box-Cox transformation requires all positive values.")
-        
-    def yeojohnson_transform(self, col):
-        """Yeo-Johnson transformation (works with any range of values)."""
-        yeo_transformer = PowerTransformer(method='yeo-johnson')
-        transformed = yeo_transformer.fit_transform(self.df[[col]].dropna())
-        return {'transformed': pd.Series(transformed.flatten(), index=self.df[col].index), 'skew': pd.Series(transformed.flatten()).skew()}
 
     def remove_outliers(self, columns, method='iqr', threshold=1.5):
         """Remove outliers from specified columns using IQR or Z-score method."""
